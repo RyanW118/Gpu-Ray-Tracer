@@ -7,31 +7,69 @@ using Silk.NET.Windowing;
 
 namespace NativeRayTracer;
 
+/// Main orchestration and application entry point for the cross-platform Interactive Ray Tracer.
+/// Handles window life cycle, OpenGL initialization, user interactive inputs, and runtime performance rendering switching.
+
 class Program
 {
+    //The UI interactive window context wrapper handled by Silk.NET.
     private static IWindow? _window;
+
+    //The OpenGL API connection handle instance for texture compilation and display buffering.
     private static GL? _gl;
+
+    //The active hardware acceleration execution logic module for Ray Tracing computing patterns.
     private static RayTraceEngine? _engine;
+
+    //The unmanaged flat array stream memory buffer containing target screen frame colors.
     private static byte[]? _pixelBuffer;
 
+    //The cross-compiled active standard reference handle to the screen canvas pipeline texture mapping context.
     private static uint _textureId;
+
+    //The vertex array object configuration reference identifier binding data descriptors.
     private static uint _vao;
+
+    //The vertex allocation data buffer segment identifier array pointer map.
     private static uint _vbo;
+
+    //The linked multi-stage glsl shader translation application system program layout pointer mapping block.
     private static uint _shaderProgram;
 
+    //The index representing current thread configuration mode mapping schemes (1 to 5).
     private static int _currentMode = 1;
-    private static string _modeName = "1. CPU Sequential";
-    private static bool _showComplexityMap = false;
-    private static bool _triggerBenchmarkSnapshot = false; // Flag to execute evaluation analysis
 
+    //The descriptive string matching the running algorithmic strategy layout representation.
+    private static string _modeName = "1. CPU Sequential";
+
+    //A toggle flag forcing execution engines to map localized execution density metrics via a visualization heatmap view.
+    private static bool _showComplexityMap = false;
+
+    //Flag utilized to instruct systems to instantly compile multi-tier architecture evaluation sweeps via F5.
+    private static bool _triggerBenchmarkSnapshot = false;
+
+    //The localized 3-space positional representation vector of the active viewport viewer.
     private static Vector3 _cameraPos = new Vector3(0, 0, 0);
+
+    //The horizontal angular direction modifier mapping side-to-side rotation constraints.
     private static float _yaw = -90.0f;
+
+    //The vertical angular direction tracking constraint variable mapping horizon pitch bounds.
     private static float _pitch = 0.0f;
 
+    //The relative state coordinate snapshot mapping mouse vector positioning on previous updates.
     private static Vector2 _lastMousePos;
+
+    //A state tracker checking if a left click drag interaction matrix update loop is executing.
     private static bool _isMouseDragging = false;
+
+    //The pointer targeting active peripheral components transmitting keyboard button flags.
     private static IKeyboard? _activeKeyboard;
 
+    // A toggle flag to spawn a highly reflective sphere to stress test GPU dynamic scheduling.
+    private static bool _showReflectiveSphere = false;
+
+    // Program execution launcher. Configures environment variables, configures the execution environment size, and runs loops.
     static void Main(string[] args)
     {
         var options = WindowOptions.Default;
@@ -48,6 +86,7 @@ class Program
         _window.Run();
     }
 
+    // Allocates critical device dependencies, establishes inputs, and builds required layout buffers.
     private static unsafe void OnLoad()
     {
         if (_window == null) return;
@@ -137,6 +176,7 @@ class Program
         _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)GLEnum.Linear);
     }
 
+    // Reacts to OS canvas resize instructions to recalculate viewport sizing parameters gracefully.
     private static void OnWindowResize(Silk.NET.Maths.Vector2D<int> newSize)
     {
         if (_engine == null || _gl == null || newSize.X == 0 || newSize.Y == 0) return;
@@ -146,6 +186,7 @@ class Program
         _gl.Viewport(0, 0, (uint)newSize.X, (uint)newSize.Y);
     }
 
+    // Listens for peripheral keystroke activities to manipulate thread paradigms or toggle diagnostic views.
     private static void OnKeyDown(IKeyboard keyboard, Key key, int keyCode)
     {
         if (key == Key.Number1) { _currentMode = 1; _modeName = "1. CPU Sequential"; _showComplexityMap = false; }
@@ -153,15 +194,22 @@ class Program
         if (key == Key.Number3) { _currentMode = 3; _modeName = "3. CPU Dynamic Tiling"; _showComplexityMap = false; }
         if (key == Key.Number4) { _currentMode = 4; _modeName = "4. GPU Baseline SIMT"; }
         if (key == Key.Number5) { _currentMode = 5; _modeName = "5. GPU Tiled Optimization"; }
+        if (key == Key.Number6) { _currentMode = 6; _modeName = "6. GPU Dynamic Thread Scheduling"; }
 
         if (key == Key.H)
         {
-            if (_currentMode == 4 || _currentMode == 5)
+            if (_currentMode == 4 || _currentMode == 5 || _currentMode == 6)
             {
                 _showComplexityMap = !_showComplexityMap;
-                string baseGpuName = (_currentMode == 4) ? "4. GPU Baseline SIMT" : "5. GPU Tiled Optimization";
+                string baseGpuName = _currentMode == 4 ? "4. GPU Baseline SIMT" :
+                              _currentMode == 5 ? "5. GPU Tiled Optimization" :
+                                                  "6. GPU Dynamic Thread Scheduling";
                 _modeName = _showComplexityMap ? $"{baseGpuName} (Heatmap Active)" : baseGpuName;
             }
+        }
+        if (key == Key.R)
+        {
+            _showReflectiveSphere = !_showReflectiveSphere;
         }
 
         // Trigger snapshot evaluation run via F5
@@ -226,11 +274,12 @@ class Program
         if (_activeKeyboard.IsKeyPressed(Key.ShiftLeft)) _cameraPos -= up * moveSpeed;
     }
 
+    // RENDER OBJECTS
     private static unsafe void OnRender(double deltaTime)
     {
         _gl!.Clear((uint)ClearBufferMask.ColorBufferBit);
 
-        GpuObject[] sceneObjects = new GpuObject[10];
+        GpuObject[] sceneObjects = new GpuObject[30];
 
         sceneObjects[0] = new GpuObject
         {
@@ -291,6 +340,74 @@ class Program
                 Mat = new Material { Color = new GpuVector3(255, 100, 250), Reflectivity = 0.70f }
             };
         }
+        // Generates 5 non-overlapping highly reflective stress-test mirror spheres
+        for (int i = 0; i < 5; i++)
+        {
+            // (Spacing of 1.5f ensures no overlap since the sphere diameter is 1.4f)
+            float xOffset = -2.0f + (i * 1.5f);
+
+            sceneObjects[10 + i] = new GpuObject
+            {
+                Type = ShapeType.Sphere,
+                // If toggle is ON, space them along the X-axis. If OFF, hide them underground.
+                Position = _showReflectiveSphere
+                    ? new GpuVector3(xOffset, 1.2f, -5.5f)
+                    : new GpuVector3(0.0f, -1000.0f, 0.0f),
+                Size = new GpuVector3(0.7f, 0.0f, 0.0f),
+                Mat = new Material { Color = new GpuVector3(255, 255, 255), Reflectivity = 0.95f }
+            };
+        }
+        // Another 5 non-overlapping highly reflective stress-test mirror spheres (different side)
+        for (int i = 0; i < 5; i++)
+        {
+            // (Spacing of 1.5f ensures no overlap since the sphere diameter is 1.4f)
+            float xOffset = -2.0f + (i * 1.5f);
+
+            sceneObjects[15 + i] = new GpuObject
+            {
+                Type = ShapeType.Sphere,
+                // If toggle is ON, space them along the X-axis. If OFF, hide them underground.
+                Position = _showReflectiveSphere
+                    ? new GpuVector3(xOffset, 1.2f, -2.6f)
+                    : new GpuVector3(0.0f, -1000.0f, 0.0f),
+                Size = new GpuVector3(0.7f, 0.0f, 0.0f),
+                Mat = new Material { Color = new GpuVector3(255, 255, 255), Reflectivity = 0.95f }
+            };
+        }
+        // Another 5 non-overlapping highly reflective stress-test mirror spheres (different side)
+        for (int i = 0; i < 5; i++)
+        {
+            // (Spacing of 1.5f ensures no overlap since the sphere diameter is 1.4f)
+            float zOffset = -5.5f + (i * 1.5f);
+
+            sceneObjects[20 + i] = new GpuObject
+            {
+                Type = ShapeType.Sphere,
+                // If toggle is ON, space them along the X-axis. If OFF, hide them underground.
+                Position = _showReflectiveSphere
+                    ? new GpuVector3(-3.0f, 1.2f, zOffset)
+                    : new GpuVector3(0.0f, -1000.0f, 0.0f),
+                Size = new GpuVector3(0.7f, 0.0f, 0.0f),
+                Mat = new Material { Color = new GpuVector3(255, 255, 255), Reflectivity = 0.95f }
+            };
+        }
+        // Another 5 non-overlapping highly reflective stress-test mirror spheres (different side)
+        for (int i = 0; i < 5; i++)
+        {
+            // (Spacing of 1.5f ensures no overlap since the sphere diameter is 1.4f)
+            float zOffset = -5.5f + (i * 1.5f);
+
+            sceneObjects[25 + i] = new GpuObject
+            {
+                Type = ShapeType.Sphere,
+                // If toggle is ON, space them along the X-axis. If OFF, hide them underground.
+                Position = _showReflectiveSphere
+                    ? new GpuVector3(4.0f, 1.2f, zOffset)
+                    : new GpuVector3(0.0f, -1000.0f, 0.0f),
+                Size = new GpuVector3(0.7f, 0.0f, 0.0f),
+                Mat = new Material { Color = new GpuVector3(255, 255, 255), Reflectivity = 0.95f }
+            };
+        }
 
         Vector3 lightDirection = Vector3.Normalize(new Vector3(0.5f, 1.0f, 0.3f));
 
@@ -307,13 +424,15 @@ class Program
         Vector3 up = Vector3.Normalize(Vector3.Cross(right, forward));
 
         // EXECUTE PERFORMANCE BENCHMARK SNAPSHOT IF REQUESTED
+        // OUTPUT PERFORMANCE ANALYSIS REPORT
         if (_triggerBenchmarkSnapshot)
         {
             _triggerBenchmarkSnapshot = false; // Reset immediately
-            Console.Clear();
+            // Console.Clear();
             Console.WriteLine("=====================================================================================================");
-            Console.WriteLine($" EVALUATION ANALYZER PRO SNAPSHOT ({_engine!.Width}x{_engine!.Height} | 10 scene objects)");
+            Console.WriteLine($" EVALUATION ANALYZER SNAPSHOT ({_engine!.Width}x{_engine!.Height} | 10 (30) scene objects)");
             Console.WriteLine($" Camera Position: ({_cameraPos.X:F2}, {_cameraPos.Y:F2}, {_cameraPos.Z:F2})");
+            Console.WriteLine($"[Hardware Detected]: {_engine!.ActiveHardwareName}");
             Console.WriteLine("=====================================================================================================");
             Console.WriteLine(string.Format("| {0,-25} | {1,8} | {2,8} | {3,7} | {4,9} | {5,9} | {6,11} |",
                 "Algorithm Engine", "Avg (ms)", "Max (ms)", "FPS", "Speedup", "MRays/s", "Efficiency"));
@@ -356,6 +475,9 @@ class Program
                 break;
             case 5:
                 _engine!.RenderGpuTiledOptimized(_pixelBuffer!, sceneObjects, _cameraPos, forward, right, up, lightDirection, _showComplexityMap);
+                break;
+            case 6:
+                _engine!.RenderGpuDynamicScheduled(_pixelBuffer!, sceneObjects, _cameraPos, forward, right, up, lightDirection, _showComplexityMap);
                 break;
         }
 

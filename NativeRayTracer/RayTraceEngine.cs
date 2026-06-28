@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Threading.Tasks;
 using ILGPU;
 using ILGPU.Runtime;
+using ILGPU.Algorithms;
 
 namespace NativeRayTracer;
 
@@ -44,7 +45,15 @@ public struct GpuVector3
         return len > 0 ? new GpuVector3(v.X / len, v.Y / len, v.Z / len) : new GpuVector3(0, 0, 0);
     }
 }
-
+public struct GpuRay
+{
+    public GpuVector3 Origin;
+    public GpuVector3 Direction;
+    public GpuVector3 ReflectionWeight;
+    public GpuVector3 AccumulatedColor;
+    public int PixelIndex; // Keeps track of which pixel this ray belongs to
+    public int Bounce;
+}
 public struct RenderSettings
 {
     public GpuVector3 CameraPos;
@@ -72,13 +81,14 @@ public class RayTraceEngine : IDisposable
 {
     public int Width { get; private set; }
     public int Height { get; private set; }
+    public string ActiveHardwareName => _accelerator.Name;
 
     private readonly Context _context;
     private readonly Accelerator _accelerator;
 
     private readonly Action<Index2D, ArrayView2D<byte, Stride2D.DenseX>, ArrayView<GpuObject>, RenderSettings> _gpuKernel;
     private readonly Action<KernelConfig, Index2D, ArrayView2D<byte, Stride2D.DenseX>, ArrayView<GpuObject>, RenderSettings> _gpuTiledKernel;
-
+    private readonly Action<Index1D, ArrayView2D<byte, Stride2D.DenseX>, ArrayView<GpuObject>, ArrayView<int>, ArrayView<int>, RenderSettings> _gpuDynamicKernel;
     private MemoryBuffer2D<byte, Stride2D.DenseX> _dOutput;
 
     public RayTraceEngine(int initialWidth, int initialHeight)
@@ -87,12 +97,28 @@ public class RayTraceEngine : IDisposable
         Height = initialHeight;
 
         _context = Context.CreateDefault();
-        _accelerator = _context.GetPreferredDevice(preferCPU: false).CreateAccelerator(_context);
+
+        // Here we can switch to AMD radeon (integrated GPU) or Nvidia Graphic Cards [GPU switch]
+        // 1. Query the available devices in the current context
+        // 2. Search for the NVIDIA GPU in the available devices list
+        var targetDevice = _context.Devices
+            .FirstOrDefault(d => d.Name.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase));
+
+        // 3. Fallback safely just in case the NVIDIA GPU is busy or unavailable
+        if (targetDevice == null)
+        {
+            targetDevice = _context.GetPreferredDevice(preferCPU: false);
+        }
+        // 4. Initialize the accelerator using the explicitly selected device
+        _accelerator = targetDevice.CreateAccelerator(_context);
+
+        // // Here is using the integrated GPU (Comment this to swithc to the NVIDIA GPU)
+        // var targetDevice = _context.GetPreferredDevice(preferCPU: false);
+        // _accelerator = targetDevice.CreateAccelerator(_context);
 
         _gpuKernel = _accelerator.LoadAutoGroupedStreamKernel<Index2D, ArrayView2D<byte, Stride2D.DenseX>, ArrayView<GpuObject>, RenderSettings>(GpuKernelImplementation);
         _gpuTiledKernel = _accelerator.LoadStreamKernel<Index2D, ArrayView2D<byte, Stride2D.DenseX>, ArrayView<GpuObject>, RenderSettings>(GpuTiledKernelImplementation);
-
-        _dOutput = _accelerator.Allocate2DDenseX<byte>(new Index2D(Width * 4, Height));
+        _gpuDynamicKernel = _accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView2D<byte, Stride2D.DenseX>, ArrayView<GpuObject>, ArrayView<int>, ArrayView<int>, RenderSettings>(GpuDynamicKernelImplementation); _dOutput = _accelerator.Allocate2DDenseX<byte>(new Index2D(Width * 4, Height));
     }
 
     public void Resize(int newWidth, int newHeight)
@@ -120,7 +146,8 @@ public class RayTraceEngine : IDisposable
             (2, "CPU Parallel.For"),
             (3, "CPU Dynamic Tiling"),
             (4, "GPU Parallel (Baseline)"),
-            (5, "GPU Tiled Optimized")
+            (5, "GPU Tiled Optimized"),
+            (6, "GPU Dynamic Scheduled")
         };
 
         double baselineAvg = -1.0;
@@ -245,6 +272,7 @@ public class RayTraceEngine : IDisposable
             case 3: RenderCpuDynamicTiling(buffer, objects, cp, cf, cr, cu, ld); break;
             case 4: RenderGpuParallel(buffer, objects, cp, cf, cr, cu, ld, false); break;
             case 5: RenderGpuTiledOptimized(buffer, objects, cp, cf, cr, cu, ld, false); break;
+            case 6: RenderGpuDynamicScheduled(buffer, objects, cp, cf, cr, cu, ld, false); break;
         }
     }
 
@@ -330,6 +358,126 @@ public class RayTraceEngine : IDisposable
         _accelerator.Synchronize();
 
         _dOutput.View.AsContiguous().CopyToCPU(buffer);
+    }
+
+    public void RenderGpuDynamicScheduled(byte[] buffer, GpuObject[] objects, Vector3 camPos, Vector3 camForward, Vector3 camRight, Vector3 camUp, Vector3 lightDir, bool showComplexityMap)
+    {
+        RenderSettings settings = CreateSettings(camPos, camForward, camRight, camUp, lightDir, showComplexityMap);
+        using var d_objects = _accelerator.Allocate1D(objects);
+
+        // Single global counter to distribute workloads
+        using var d_tileCounter = _accelerator.Allocate1D<int>(1);
+        d_tileCounter.View.CopyFromCPU(new int[] { 0 });
+
+        // Launch a pool of persistent threads (e.g., ~130,000 threads).
+        // 65,536 (or 256 groups of 256 threads) is a standard architectural sweet spot 
+        // for persistent thread work-stealing loops on modern GPUs. It ensures all 
+        // Streaming Multiprocessors (SMs) are 100% saturated with active warps.
+        int persistentThreadCount = 65536;
+        // Allocate an array large enough to act as a secure bulletin board for thread leaders 
+        // to broadcast work assignments to their local group members.
+        using var d_groupAssignments = _accelerator.Allocate1D<int>(persistentThreadCount);
+
+        // Launch the group-level work stealing kernel
+        _gpuDynamicKernel(persistentThreadCount, _dOutput.View, d_objects.View, d_tileCounter.View, d_groupAssignments.View, settings);
+        _accelerator.Synchronize();
+
+        _dOutput.View.AsContiguous().CopyToCPU(buffer);
+    }
+
+    private static void GpuDynamicKernelImplementation(
+           Index1D index, // Keeps working Index1D signature intact
+           ArrayView2D<byte, Stride2D.DenseX> output,
+           ArrayView<GpuObject> objects,
+           ArrayView<int> tileCounter,
+           ArrayView<int> groupAssignments,
+           RenderSettings settings)
+    {
+        // 1. Define the 2D Tile Dimensions (Matches Mode 5's cache efficiency)
+        int tileSizeX = 16;
+        int tileSizeY = 16;
+        int pixelsPerTile = tileSizeX * tileSizeY; // 256 pixels per tile
+
+        int numTilesX = ((int)settings.WindowWidth + tileSizeX - 1) / tileSizeX;
+        int numTilesY = ((int)settings.WindowHeight + tileSizeY - 1) / tileSizeY;
+        int totalTiles = numTilesX * numTilesY;
+
+        int groupId = Grid.IdxX;
+        int localId = Group.IdxX;
+        int groupSize = Group.DimX; // Usually 32, 64, or 256 depending on driver
+
+        while (true)
+        {
+            // 2. LEADER THREAD: Steal a 2D Tile ID instead of a pixel batch
+            if (localId == 0)
+            {
+                groupAssignments[groupId] = Atomic.Add(ref tileCounter[0], 1);
+            }
+
+            Group.Barrier();
+            int currentTileId = groupAssignments[groupId];
+
+            // If no more tiles exist across the screen, exit the persistent loop
+            if (currentTileId >= totalTiles)
+                break;
+
+            // 3. Convert the Tile ID into 2D starting coordinates for this block
+            int tileX = currentTileId % numTilesX;
+            int tileY = currentTileId / numTilesX;
+            int startPixelX = tileX * tileSizeX;
+            int startPixelY = tileY * tileSizeY;
+
+            // 4. COALESCED LOOP: Threads process the 2D tile together
+            // Even if groupSize is smaller than 256, it loops until the 16x16 tile is done.
+            for (int i = localId; i < pixelsPerTile; i += groupSize)
+            {
+                // Map the 1D loop index 'i' into local 2D coordinates within the tile
+                int localX = i % tileSizeX;
+                int localY = i / tileSizeX;
+
+                // Calculate exact screen coordinates
+                int x = startPixelX + localX;
+                int y = startPixelY + localY;
+
+                // Ensure we don't draw outside the window boundaries
+                if (x < (int)settings.WindowWidth && y < (int)settings.WindowHeight)
+                {
+                    float u = (x - settings.WindowWidth / 2.0f) / (settings.WindowHeight / 2.0f);
+                    float v = -(y - settings.WindowHeight / 2.0f) / (settings.WindowHeight / 2.0f);
+
+                    GpuVector3 rayDir = GpuVector3.Normalize(settings.CameraForward + (settings.CameraRight * u) + (settings.CameraUp * v));
+                    GpuVector3 color = TraceRayGpu(settings.CameraPos, rayDir, objects, settings.LightDir, settings.ShowThreadComplexity == 1);
+
+                    float b = color.Z; if (b < 0f) b = 0f; else if (b > 255f) b = 255f;
+                    float g = color.Y; if (g < 0f) g = 0f; else if (g > 255f) g = 255f;
+                    float r = color.X; if (r < 0f) r = 0f; else if (r > 255f) r = 255f;
+
+                    int baseChannelX = x * 4;
+                    output[new Index2D(baseChannelX + 0, y)] = (byte)b;
+                    output[new Index2D(baseChannelX + 1, y)] = (byte)g;
+                    output[new Index2D(baseChannelX + 2, y)] = (byte)r;
+                    output[new Index2D(baseChannelX + 3, y)] = 255;
+                }
+            }
+
+            // Sync before requesting the next tile
+            Group.Barrier();
+        }
+    }
+    private static void WritePixelToOutput(int pixelIndex, GpuVector3 color, ArrayView2D<byte, Stride2D.DenseX> output, RenderSettings settings)
+    {
+        int x = pixelIndex % (int)settings.WindowWidth;
+        int y = pixelIndex / (int)settings.WindowWidth;
+
+        float b = color.Z; if (b < 0f) b = 0f; else if (b > 255f) b = 255f;
+        float g = color.Y; if (g < 0f) g = 0f; else if (g > 255f) g = 255f;
+        float r = color.X; if (r < 0f) r = 0f; else if (r > 255f) r = 255f;
+
+        int baseChannelX = x * 4;
+        output[new Index2D(baseChannelX + 0, y)] = (byte)b;
+        output[new Index2D(baseChannelX + 1, y)] = (byte)g;
+        output[new Index2D(baseChannelX + 2, y)] = (byte)r;
+        output[new Index2D(baseChannelX + 3, y)] = 255;
     }
 
     private RenderSettings CreateSettings(Vector3 cp, Vector3 cf, Vector3 cr, Vector3 cu, Vector3 ld, bool complexityMap) => new()
@@ -512,8 +660,8 @@ public class RayTraceEngine : IDisposable
         GpuVector3 currentDir = dir;
         float reflectionWeight = 1.0f;
         int totalIntersectionsEvaluated = 0;
-
-        for (int bounce = 0; bounce < 4; bounce++)
+        // Set the light bounce limit
+        for (int bounce = 0; bounce < 8; bounce++)
         {
             float closestT = float.MaxValue;
             int hitIndex = -1;
